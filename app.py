@@ -1,11 +1,9 @@
-# Flask-only backend: yt-dlp (for downloading) + ytmusicapi for search
+# Flask-only backend: yt-dlp (library) + ytmusicapi for search
 
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from ytmusicapi import YTMusic
-import os
-import subprocess
-import shutil
+from yt_dlp import YoutubeDL
 from pathlib import Path
 from collections import OrderedDict
 
@@ -75,6 +73,29 @@ def search():
         print("Search error:", e)
         return jsonify({"error": "Search failed"}), 500
 
+# -------------------- Download Helper --------------------
+
+def download_audio(video_id, audio_format="mp3"):
+    video_url = f"https://youtube.com/watch?v={video_id}"
+    output_path = str(DOWNLOAD_DIR / "%(id)s.%(ext)s")
+
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': output_path,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': audio_format,
+            'preferredquality': '192',
+        }],
+        'quiet': True,
+        'noplaylist': True,
+    }
+
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(video_url, download=True)
+        filename = f"{info['id']}.{audio_format}"
+        return filename
+
 # -------------------- /download Endpoint --------------------
 
 @app.route("/download")
@@ -86,7 +107,6 @@ def download():
 
     expected_file = DOWNLOAD_DIR / f"{video_id}.{audio_format}"
     if expected_file.exists():
-        # Touch file to update access time
         expected_file.touch()
         return jsonify({
             "message": "Already downloaded",
@@ -94,31 +114,14 @@ def download():
             "url": f"/file/{expected_file.name}"
         })
 
-    video_url = f"https://youtube.com/watch?v={video_id}"
     try:
-        output_path = str(DOWNLOAD_DIR / "%(id)s.%(ext)s")
-        cmd = [
-            "yt-dlp", "-x", "--audio-format", audio_format,
-            "-o", output_path,
-            video_url
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        filename = download_audio(video_id, audio_format)
         cleanup_downloads_dir()
-
-        match = None
-        for line in result.stdout.splitlines():
-            if "Destination:" in line:
-                match = line.split("Destination:", 1)[1].strip()
-                break
-
-        if match:
-            filename = os.path.basename(match)
-            return jsonify({
-                "message": "Downloaded",
-                "filename": filename,
-                "url": f"/file/{filename}"
-            })
-        return jsonify({"error": "Could not detect output filename"}), 500
+        return jsonify({
+            "message": "Downloaded",
+            "filename": filename,
+            "url": f"/file/{filename}"
+        })
     except Exception as e:
         return jsonify({"error": "Download failed", "details": str(e)}), 500
 
@@ -132,4 +135,4 @@ def serve_file(filename):
 
 if __name__ == "__main__":
     cleanup_downloads_dir()
-    app.run(host='0.0.0.0', port=5000)  
+    app.run(host='0.0.0.0', port=5000)
