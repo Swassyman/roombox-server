@@ -1,11 +1,10 @@
-# Flask-only backend: yt-dlp (library) + ytmusicapi for search
-
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from ytmusicapi import YTMusic
-from yt_dlp import YoutubeDL
+import os
 from pathlib import Path
 from collections import OrderedDict
+import yt_dlp  # ← local file import
 
 app = Flask(__name__)
 CORS(app)
@@ -15,23 +14,15 @@ ytmusic = YTMusic()
 DOWNLOAD_DIR = Path("downloads")
 MAX_FILES = 10
 ALLOWED_EXTENSIONS = {".mp3", ".webm", ".m4a"}
-
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# -------------------- Cache --------------------
 search_cache = OrderedDict()
 MAX_CACHE_SIZE = 15
-
-# -------------------- Utility --------------------
 
 def cleanup_downloads_dir():
     files = [f for f in DOWNLOAD_DIR.iterdir() if f.suffix.lower() in ALLOWED_EXTENSIONS]
     file_stats = [
-        {
-            "file": f,
-            "time": f.stat().st_atime,
-            "size": f.stat().st_size
-        }
+        {"file": f, "time": f.stat().st_atime, "size": f.stat().st_size}
         for f in files
     ]
     file_stats.sort(key=lambda x: x["time"])
@@ -49,8 +40,6 @@ def cleanup_downloads_dir():
             f["file"].unlink()
         except Exception as e:
             print(f"Error deleting {f['file']}: {e}")
-
-# -------------------- /search Endpoint --------------------
 
 @app.route("/search")
 def search():
@@ -73,31 +62,6 @@ def search():
         print("Search error:", e)
         return jsonify({"error": "Search failed"}), 500
 
-# -------------------- Download Helper --------------------
-
-def download_audio(video_id, audio_format="mp3"):
-    video_url = f"https://youtube.com/watch?v={video_id}"
-    output_path = str(DOWNLOAD_DIR / "%(id)s.%(ext)s")
-
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': output_path,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': audio_format,
-            'preferredquality': '192',
-        }],
-        'quiet': True,
-        'noplaylist': True,
-    }
-
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(video_url, download=True)
-        filename = f"{info['id']}.{audio_format}"
-        return filename
-
-# -------------------- /download Endpoint --------------------
-
 @app.route("/download")
 def download():
     video_id = request.args.get("id")
@@ -114,24 +78,39 @@ def download():
             "url": f"/file/{expected_file.name}"
         })
 
+    video_url = f"https://youtube.com/watch?v={video_id}"
+    output_template = str(DOWNLOAD_DIR / "%(id)s.%(ext)s")
+
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "extractaudio": True,
+        "audioformat": audio_format,
+        "outtmpl": output_template,
+        "quiet": True,
+        "noplaylist": True,
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": audio_format,
+            "preferredquality": "192",
+        }]
+    }
+
     try:
-        filename = download_audio(video_id, audio_format)
-        cleanup_downloads_dir()
-        return jsonify({
-            "message": "Downloaded",
-            "filename": filename,
-            "url": f"/file/{filename}"
-        })
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=True)
+            filename = f"{info['id']}.{audio_format}"
+            cleanup_downloads_dir()
+            return jsonify({
+                "message": "Downloaded",
+                "filename": filename,
+                "url": f"/file/{filename}"
+            })
     except Exception as e:
         return jsonify({"error": "Download failed", "details": str(e)}), 500
-
-# -------------------- File Serving --------------------
 
 @app.route("/file/<path:filename>")
 def serve_file(filename):
     return send_from_directory(DOWNLOAD_DIR, filename, as_attachment=True)
-
-# -------------------- Run Server --------------------
 
 if __name__ == "__main__":
     cleanup_downloads_dir()
